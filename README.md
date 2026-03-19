@@ -2,7 +2,7 @@
 
 > Enhanced interactive terminal interface for KeePassXC databases using `keepassxc-cli` and `fzf`.
 
-A fork of [creusvictor/kpx](https://github.com/creusvictor/kpx) with significant enhancements — themes, multi-database support, in-terminal notifications, new entry creation, TOTP, and more.
+A fork of [creusvictor/kpx](https://github.com/creusvictor/keepassxc-fzf) with significant enhancements — themes, multi-database support, in-terminal notifications, new entry creation, TOTP, and more.
 
 ---
 
@@ -234,7 +234,7 @@ On Windows Subsystem for Linux:
 
 ## Credits
 
-Based on the original [kpx](https://github.com/creusvictor/kpx) by [@creusvictor](https://github.com/creusvictor).
+Based on the original [kpx](https://github.com/creusvictor/keepassxc-fzf) by [@creusvictor](https://github.com/creusvictor).
 
 ---
 
