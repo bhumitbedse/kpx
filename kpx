@@ -1,0 +1,834 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+VERSION="1.0.0"
+CONFIG_DIR="${HOME}/.config/kpx"
+CONFIG_FILE="${CONFIG_DIR}/config"
+
+# ── Global variables ──────────────────────────────────────────────────────────
+DATABASE=""
+PASSWORD=""
+KEYFILE=""
+KPPW_FILE="${KPPW_FILE:-}"
+
+# ── Default config values (overridden by config file) ────────────────────────
+THEME="tokyo-night"
+PASS_TIMEOUT=10
+OTHER_TIMEOUT=30
+DEFAULT_GROUP="General"
+
+# ── Load config file ──────────────────────────────────────────────────────────
+load_config() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    while IFS='=' read -r key value; do
+        [[ "$key" =~ ^#  ]] && continue   # skip comments
+        [[ -z "$key"     ]] && continue   # skip blank lines
+        key="${key// /}"
+        value="${value// /}"
+        case "$key" in
+            theme)         THEME="$value" ;;
+            pass_timeout)  PASS_TIMEOUT="$value" ;;
+            other_timeout) OTHER_TIMEOUT="$value" ;;
+            default_group) DEFAULT_GROUP="$value" ;;
+        esac
+    done < "$CONFIG_FILE"
+}
+
+# ── Create default config + example if missing ───────────────────────────────
+init_config() {
+    mkdir -p "$CONFIG_DIR"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" << 'EOF'
+# kpx configuration
+# ─────────────────────────────────────────────────────
+# Theme options: tokyo-night | gruvbox | catppuccin | dracula | nord | minimal
+theme = tokyo-night
+
+# Clipboard clear timeouts (seconds)
+pass_timeout  = 10
+other_timeout = 30
+
+# Default group when adding new entries
+default_group = General
+
+# Databases — add one per line:
+# database = /home/user/passwords.kdbx
+# database = /home/user/work.kdbx
+# keyfile  = /home/user/my.key    (optional, paired with last database line)
+EOF
+        echo "Created default config at $CONFIG_FILE"
+    fi
+}
+
+# ── Read databases from config ────────────────────────────────────────────────
+get_config_databases() {
+    [ -f "$CONFIG_FILE" ] || return
+    local last_db=""
+    while IFS='=' read -r key value; do
+        [[ "$key" =~ ^# ]] && continue
+        [[ -z "$key"    ]] && continue
+        key="${key// /}"; value="${value// /}"
+        case "$key" in
+            database) echo "db:$value" ;;
+            keyfile)  echo "kf:$value" ;;
+        esac
+    done < "$CONFIG_FILE"
+}
+
+# ── Theme definitions ─────────────────────────────────────────────────────────
+apply_theme() {
+    case "${THEME:-tokyo-night}" in
+        tokyo-night)
+            TC_BG="#13141f";    TC_BGS="#1e2030"
+            TC_FG="#c8d3f5";    TC_FGS="#c8d3f5"
+            TC_HL="#87ceeb";    TC_HLS="#87ceeb"
+            TC_PROMPT="#ff966c"; TC_HDR="#ff966c"
+            TC_INFO="#65bcff";  TC_SPIN="#87ceeb"
+            TC_PTR="#87ceeb";   TC_MRK="#c3e88d"
+            P_TITLE="215"; P_KEY="245"; P_USER="87"
+            P_PASS="177";  P_URL="75";  P_NOTE="245"
+            P_STRENGTH="221"
+            ;;
+        gruvbox)
+            TC_BG="#282828";    TC_BGS="#3c3836"
+            TC_FG="#ebdbb2";    TC_FGS="#fbf1c7"
+            TC_HL="#fabd2f";    TC_HLS="#fabd2f"
+            TC_PROMPT="#fe8019"; TC_HDR="#8ec07c"
+            TC_INFO="#83a598";  TC_SPIN="#b8bb26"
+            TC_PTR="#fb4934";   TC_MRK="#b8bb26"
+            P_TITLE="214"; P_KEY="243"; P_USER="108"
+            P_PASS="175";  P_URL="109"; P_NOTE="243"
+            P_STRENGTH="184"
+            ;;
+        catppuccin)
+            TC_BG="#1e1e2e";    TC_BGS="#313244"
+            TC_FG="#cdd6f4";    TC_FGS="#cdd6f4"
+            TC_HL="#89b4fa";    TC_HLS="#89dceb"
+            TC_PROMPT="#cba6f7"; TC_HDR="#a6e3a1"
+            TC_INFO="#89b4fa";  TC_SPIN="#f38ba8"
+            TC_PTR="#f5c2e7";   TC_MRK="#a6e3a1"
+            P_TITLE="183"; P_KEY="245"; P_USER="117"
+            P_PASS="183";  P_URL="111"; P_NOTE="245"
+            P_STRENGTH="156"
+            ;;
+        dracula)
+            TC_BG="#282a36";    TC_BGS="#44475a"
+            TC_FG="#f8f8f2";    TC_FGS="#f8f8f2"
+            TC_HL="#bd93f9";    TC_HLS="#ff79c6"
+            TC_PROMPT="#50fa7b"; TC_HDR="#ffb86c"
+            TC_INFO="#8be9fd";  TC_SPIN="#ff79c6"
+            TC_PTR="#ff79c6";   TC_MRK="#50fa7b"
+            P_TITLE="141"; P_KEY="245"; P_USER="117"
+            P_PASS="212";  P_URL="117"; P_NOTE="245"
+            P_STRENGTH="84"
+            ;;
+        nord)
+            TC_BG="#2e3440";    TC_BGS="#3b4252"
+            TC_FG="#d8dee9";    TC_FGS="#eceff4"
+            TC_HL="#88c0d0";    TC_HLS="#81a1c1"
+            TC_PROMPT="#a3be8c"; TC_HDR="#ebcb8b"
+            TC_INFO="#81a1c1";  TC_SPIN="#88c0d0"
+            TC_PTR="#bf616a";   TC_MRK="#a3be8c"
+            P_TITLE="110"; P_KEY="245"; P_USER="109"
+            P_PASS="147";  P_URL="110"; P_NOTE="245"
+            P_STRENGTH="150"
+            ;;
+        minimal)
+            TC_BG="#000000";    TC_BGS="#111111"
+            TC_FG="#ffffff";    TC_FGS="#ffffff"
+            TC_HL="#ffffff";    TC_HLS="#ffffff"
+            TC_PROMPT="#ffffff"; TC_HDR="#aaaaaa"
+            TC_INFO="#aaaaaa";  TC_SPIN="#ffffff"
+            TC_PTR="#ffffff";   TC_MRK="#ffffff"
+            P_TITLE="15";  P_KEY="245"; P_USER="15"
+            P_PASS="15";   P_URL="15";  P_NOTE="245"
+            P_STRENGTH="15"
+            ;;
+        *)
+            apply_theme tokyo-night; return ;;
+    esac
+
+    FZF_COLORS=(
+        --color "bg:${TC_BG},bg+:${TC_BGS}"
+        --color "fg:${TC_FG},fg+:${TC_FGS}"
+        --color "hl:${TC_HL},hl+:${TC_HLS}"
+        --color "prompt:${TC_PROMPT},header:${TC_HDR}"
+        --color "info:${TC_INFO},spinner:${TC_SPIN}"
+        --color "pointer:${TC_PTR},marker:${TC_MRK}"
+    )
+    export TC_BG P_TITLE P_USER
+}
+
+# ── Colors for terminal output ────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[38;5;87m'
+ORANGE='\033[38;5;215m'
+GREY='\033[38;5;245m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# ── Print helpers ─────────────────────────────────────────────────────────────
+print_error()   { echo -e "${RED}Error: $1${NC}" >&2; }
+print_success() { echo -e "${GREEN}✔  $1${NC}"; }
+print_info()    { echo -e "${CYAN}ℹ  $1${NC}"; }
+print_warning() { echo -e "${YELLOW}⚠  $1${NC}"; }
+
+print_banner() {
+    local content="kpx  v${VERSION}  theme:${THEME}"
+    local box_w=$(( ${#content} + 4 ))  # 2 spaces each side
+    local bar; bar=$(printf '%*s' "$box_w" '' | tr ' ' '-')
+    local lpad="  "
+    local rpad="  "
+    printf "${GREY}+%s+${NC}\n" "$bar"
+    printf "${GREY}|${NC}%s${ORANGE}${BOLD}kpx${NC}  ${GREY}v${VERSION}  theme:${THEME}${NC}%s${GREY}|${NC}\n" "$lpad" "$rpad"
+    printf "${GREY}+%s+${NC}\n" "$bar"
+}
+
+# ── Notification ──────────────────────────────────────────────────────────────
+send_notify() {
+    local title="$1" msg="$2"
+    # TC_BG is set by apply_theme — use it as popup background
+    local bg_hex="${TC_BG:-#13141f}"
+
+    # Convert hex color to nearest 256-color index for terminal
+    # We embed the hex directly as a 24-bit true color escape
+    local BOX_BG="\033[48;2;$(printf '%d;%d;%d' "$((16#${bg_hex:1:2}))" "$((16#${bg_hex:3:2}))" "$((16#${bg_hex:5:2}))")m"
+    local C_BORDER="\033[38;5;${P_TITLE:-215}m"
+    local C_MSG="\033[38;5;${P_USER:-87}m"
+    local R="\033[0m"
+
+    {
+        local cols rows
+        cols=$(tput cols 2>/dev/null || echo 80)
+        rows=$(tput lines 2>/dev/null || echo 24)
+
+        local box_w=44
+        # Bottom-right corner — last 4 rows, rightmost column
+        local col=$(( cols - box_w - 1 ))
+        local row=$(( rows - 4 ))
+        [ $col -lt 0 ] && col=0
+        [ $row -lt 0 ] && row=0
+
+        [ ${#msg} -gt $(( box_w - 6 )) ] && msg="${msg:0:$(( box_w - 6 ))}.."
+
+        local pad=$(( (box_w - 2 - ${#title}) / 2 ))
+        local rpad=$(( box_w - 2 - pad - ${#title} ))
+        local title_line="│$(printf '%*s' $pad '')${title}$(printf '%*s' $rpad '')│"
+        local msg_pad=$(( (box_w - 2 - ${#msg}) / 2 ))
+        local msg_rpad=$(( box_w - 2 - msg_pad - ${#msg} ))
+        local msg_line="│$(printf '%*s' $msg_pad '')${msg}$(printf '%*s' $msg_rpad '')│"
+        local top="╭$(printf '─%.0s' $(seq 1 $((box_w-2))))╮"
+        local bot="╰$(printf '─%.0s' $(seq 1 $((box_w-2))))╯"
+
+        tput sc
+        tput cup $row $col;       printf "${BOX_BG}${C_BORDER}%s${R}" "$top"
+        tput cup $((row+1)) $col; printf "${BOX_BG}${C_BORDER}%s${R}" "$title_line"
+        tput cup $((row+2)) $col; printf "${BOX_BG}${C_MSG}%s${R}"    "$msg_line"
+        tput cup $((row+3)) $col; printf "${BOX_BG}${C_BORDER}%s${R}" "$bot"
+        tput rc
+
+        sleep 2.5
+
+        # Clear with same bg color so it blends perfectly
+        local blank="$(printf '%*s' $box_w '')"
+        tput sc
+        tput cup $row $col;       printf "${BOX_BG}%s${R}" "$blank"
+        tput cup $((row+1)) $col; printf "${BOX_BG}%s${R}" "$blank"
+        tput cup $((row+2)) $col; printf "${BOX_BG}%s${R}" "$blank"
+        tput cup $((row+3)) $col; printf "${BOX_BG}%s${R}" "$blank"
+        tput rc
+    } >/dev/tty 2>/dev/null &
+    disown $! 2>/dev/null || true
+}
+
+# ── Help ──────────────────────────────────────────────────────────────────────
+show_help() {
+    cat << EOF
+kpx v${VERSION} - Enhanced terminal interface for KeePassXC
+
+Usage: kpx [OPTIONS] [database.kdbx]
+
+Options:
+    -h, --help            Show this help
+    -k, --keyfile FILE    Use keyfile
+    -v, --version         Show version
+    --theme THEME         Override theme (tokyo-night|gruvbox|catppuccin|dracula|nord|minimal)
+    --init                Create default config file
+    --list-themes         Show available themes
+
+Environment variables:
+    KPDB    Path to KeePass database
+    KPKF    Path to keyfile
+
+Keybindings:
+    Enter       Copy password + exit
+    Ctrl+P      Copy password
+    Ctrl+U      Copy username
+    Ctrl+L      Copy URL
+    Ctrl+N      Copy notes
+    Ctrl+T      Copy TOTP code
+    Ctrl+O      Open URL in browser
+    Ctrl+E      Show full entry in pager
+    Ctrl+A      Add new entry
+    Alt+S       Show/hide password in preview
+    Alt+H       Password strength popup
+
+Config: $CONFIG_FILE
+EOF
+}
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+check_dependencies() {
+    local missing=()
+    command -v keepassxc-cli &>/dev/null || missing+=("keepassxc-cli")
+    command -v fzf           &>/dev/null || missing+=("fzf")
+    if [ ${#missing[@]} -ne 0 ]; then
+        print_error "Missing: ${missing[*]}"
+        exit 1
+    fi
+    if ! command -v xclip &>/dev/null && ! command -v wl-copy &>/dev/null \
+       && ! command -v pbcopy &>/dev/null && ! command -v clip.exe &>/dev/null; then
+        print_warning "No clipboard tool found (xclip/wl-copy/pbcopy/clip.exe)"
+    fi
+}
+
+# ── Clipboard ─────────────────────────────────────────────────────────────────
+copy_to_clipboard() {
+    local text="$1" duration="${2:-10}" label="${3:-value}"
+    if grep -qi microsoft /proc/version 2>/dev/null && command -v clip.exe &>/dev/null; then
+        echo -n "$text" | clip.exe
+    elif command -v xclip &>/dev/null; then
+        echo -n "$text" | xclip -selection clipboard
+    elif command -v wl-copy &>/dev/null; then
+        echo -n "$text" | wl-copy
+    elif command -v pbcopy &>/dev/null; then
+        echo -n "$text" | pbcopy
+    elif command -v clip.exe &>/dev/null; then
+        echo -n "$text" | clip.exe
+    else
+        return 1
+    fi
+    send_notify "kpx" "Copied ${label} — clears in ${duration}s"
+    ( sleep "$duration" && copy_to_clipboard_raw ) &>/dev/null &
+    disown $! 2>/dev/null || true
+}
+
+copy_to_clipboard_raw() {
+    if grep -qi microsoft /proc/version 2>/dev/null; then
+        return 0   # skip clear on WSL — clip.exe blank entry issue
+    elif command -v xclip &>/dev/null; then
+        echo -n "" | xclip -selection clipboard
+    elif command -v wl-copy &>/dev/null; then
+        wl-copy --clear
+    elif command -v pbcopy &>/dev/null; then
+        echo -n "" | pbcopy
+    fi
+}
+
+# ── Password file ─────────────────────────────────────────────────────────────
+setup_password_file() {
+    KPPW_FILE=$(mktemp)
+    chmod 600 "$KPPW_FILE"
+    trap 'rm -f "$KPPW_FILE"' EXIT INT TERM
+}
+
+write_password_file() { printf '%s' "$PASSWORD" > "$KPPW_FILE"; }
+
+read_password_file() {
+    if [ -z "$KPPW_FILE" ] || [ ! -f "$KPPW_FILE" ]; then
+        echo "Error: password file not found" >&2; exit 1
+    fi
+    cat "$KPPW_FILE"
+}
+
+# ── KeePass wrappers ──────────────────────────────────────────────────────────
+get_password_prompt() {
+    local prompt="${1:-Password}"
+    local password
+    echo -n "$prompt: " >&2
+    read -rs password
+    echo >&2
+    echo "$password"
+}
+
+test_database_access() {
+    local args=("keepassxc-cli" "ls")
+    [ -n "$KEYFILE" ] && args+=("-k" "$KEYFILE")
+    args+=("$DATABASE")
+    echo "$PASSWORD" | "${args[@]}" &>/dev/null
+}
+
+list_entries() {
+    local args=("keepassxc-cli" "ls" "-R" "-f")
+    [ -n "$KEYFILE" ] && args+=("-k" "$KEYFILE")
+    args+=("$DATABASE")
+    echo "$PASSWORD" | "${args[@]}" 2>/dev/null \
+        | grep -v '/$' | grep -v '^$' | sed 's|^/||'
+}
+
+get_entry_show() {
+    local args=("keepassxc-cli" "show" "-s")
+    [ -n "$KEYFILE" ] && args+=("-k" "$KEYFILE")
+    args+=("$DATABASE" "$1")
+    echo "$PASSWORD" | "${args[@]}" 2>/dev/null
+}
+
+get_entry_password() {
+    local args=("keepassxc-cli" "show" "-s" "-a" "Password")
+    [ -n "$KEYFILE" ] && args+=("-k" "$KEYFILE")
+    args+=("$DATABASE" "$1")
+    echo "$PASSWORD" | "${args[@]}" 2>/dev/null
+}
+
+get_entry_attribute() {
+    local args=("keepassxc-cli" "show" "-s" "-a" "$2")
+    [ -n "$KEYFILE" ] && args+=("-k" "$KEYFILE")
+    args+=("$DATABASE" "$1")
+    echo "$PASSWORD" | "${args[@]}" 2>/dev/null
+}
+
+get_entry_totp() {
+    local args=("keepassxc-cli" "totp")
+    [ -n "$KEYFILE" ] && args+=("-k" "$KEYFILE")
+    args+=("$DATABASE" "$1")
+    echo "$PASSWORD" | "${args[@]}" 2>/dev/null
+}
+
+# ── Password strength ─────────────────────────────────────────────────────────
+password_strength_bar() {
+    local pass="$1" score=0 plen=${#pass}
+    [[ $plen -ge 8  ]] && (( score++ )) || true
+    [[ $plen -ge 12 ]] && (( score++ )) || true
+    [[ $plen -ge 16 ]] && (( score++ )) || true
+    [[ "$pass" =~ [A-Z] ]] && (( score++ )) || true
+    [[ "$pass" =~ [0-9] ]] && (( score++ )) || true
+    [[ "$pass" =~ [^a-zA-Z0-9] ]] && (( score++ )) || true
+    local filled=$(( score * 3 )) empty=$(( 18 - score * 3 ))
+    local bar
+    bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$empty" '' | tr ' ' '-')"
+    local lbl
+    case $score in 0|1|2) lbl="Weak";; 3|4) lbl="Fair";; 5) lbl="Good";; *) lbl="Strong";; esac
+    echo "${bar}  ${lbl}  (${plen} chars)"
+}
+
+# ── Preview ───────────────────────────────────────────────────────────────────
+handle_preview() {
+    local entry="${1:-}" show_pass="${2:-false}"
+    DATABASE="$KPDB"; PASSWORD=$(read_password_file); KEYFILE="${KPKF:-}"
+    load_config; apply_theme
+
+    [ -z "$entry" ] && echo "No entry selected" && exit 0
+
+    local output
+    output=$(get_entry_show "$entry") || { echo "Error loading entry"; exit 0; }
+
+    local title user url notes pass
+    title=$(echo "$output" | grep -i '^Title:'    | sed 's/^[Tt]itle: //'    | head -1)
+    user=$( echo "$output" | grep -i '^UserName:' | sed 's/^[Uu]ser[Nn]ame: //' | head -1)
+    url=$(  echo "$output" | grep -i '^URL:'      | sed 's/^[Uu][Rr][Ll]: //'   | head -1)
+    notes=$(echo "$output" | grep -i '^Notes:'    | sed 's/^[Nn]otes: //'    | head -1)
+    pass=$( echo "$output" | grep -i '^Password:' | sed 's/^[Pp]assword: //' | head -1)
+
+    local pd
+    if [ "$show_pass" = "true" ]; then
+        pd="$pass"
+    elif [ -z "$pass" ]; then
+        pd="(empty)"
+    else
+        pd="$(head -c "${#pass}" /dev/zero | tr '\0' '*')"
+    fi
+
+    # Try TOTP
+    local totp=""
+    totp=$(get_entry_totp "$entry" 2>/dev/null) || totp=""
+
+    local T="\033[1;38;5;${P_TITLE}m"
+    local K="\033[38;5;${P_KEY}m"
+    local U="\033[38;5;${P_USER}m"
+    local PA="\033[38;5;${P_PASS}m"
+    local UL="\033[38;5;${P_URL}m"
+    local ST="\033[38;5;${P_STRENGTH}m"
+    local R="\033[0m"
+    local SEP="───────────────────────────────────"
+
+    echo ""
+    printf "  ${T}%s${R}\n" "${title:-$entry}"
+    echo -e "  ${K}${SEP}${R}"
+    echo ""
+    printf "  ${K}%-12s${R} ${U}%s${R}\n"  "User"     "${user:-(empty)}"
+    printf "  ${K}%-12s${R} ${PA}%s${R}\n" "Password" "${pd:-(empty)}"
+    printf "  ${K}%-12s${R} ${UL}%s${R}\n" "URL"      "${url:-(empty)}"
+    [ -n "$totp" ] && printf "  ${K}%-12s${R} ${ST}%s${R}\n" "TOTP" "$totp"
+    echo ""
+    echo -e "  ${K}${SEP}${R}"
+    printf "  ${K}%-12s${R} ${ST}%s${R}\n" "Strength" "$(password_strength_bar "$pass")"
+    echo ""
+    if [ -n "$notes" ]; then
+        echo -e "  ${K}Notes:${R}"
+        echo "$notes" | fold -s -w 46 | sed 's/^/  /'
+        echo ""
+    fi
+    echo -e "  ${K}${SEP}${R}"
+    echo ""
+    echo -e "  ${K}^P pwd  ^U user  ^L url  ^T totp  ^N notes${R}"
+    echo -e "  ${K}^O browser  ^E reveal  ^A add  Alt+S show${R}"
+    exit 0
+}
+
+# ── Show password ─────────────────────────────────────────────────────────────
+handle_show_password() {
+    DATABASE="$KPDB"; PASSWORD=$(read_password_file); KEYFILE="${KPKF:-}"
+    local pass; pass=$(get_entry_password "${1:-}")
+    if [ -n "$pass" ]; then
+        echo -e "\n${YELLOW}Password : $pass${NC}"
+        echo -e "Strength : $(password_strength_bar "$pass")\n"
+        echo "Press Enter to continue..."; read -r
+    fi
+}
+
+handle_show_strength() {
+    DATABASE="$KPDB"; PASSWORD=$(read_password_file); KEYFILE="${KPKF:-}"
+    local pass; pass=$(get_entry_password "${1:-}")
+    echo ""
+    echo "  Entry    : ${1:-}"
+    echo "  Length   : ${#pass} chars"
+    echo "  Strength : $(password_strength_bar "$pass")"
+    echo ""
+    echo "Press Enter to continue..."; read -r
+}
+
+# ── Copy ──────────────────────────────────────────────────────────────────────
+handle_copy() {
+    local attr="$1" entry="$2"
+    DATABASE="$KPDB"; PASSWORD=$(read_password_file); KEYFILE="${KPKF:-}"
+    load_config
+
+    local value label duration
+    case "$attr" in
+        password) value=$(get_entry_password "$entry");             label="password"; duration=$PASS_TIMEOUT ;;
+        username) value=$(get_entry_attribute "$entry" "UserName"); label="username"; duration=$OTHER_TIMEOUT ;;
+        url)      value=$(get_entry_attribute "$entry" "URL");      label="URL";      duration=$OTHER_TIMEOUT ;;
+        notes)    value=$(get_entry_attribute "$entry" "Notes");    label="notes";    duration=$OTHER_TIMEOUT ;;
+        totp)     value=$(get_entry_totp "$entry");                 label="TOTP";     duration=$PASS_TIMEOUT ;;
+    esac
+
+    if [ -n "${value:-}" ]; then
+        copy_to_clipboard "$value" "$duration" "$label"
+    fi
+}
+
+# ── Open URL ──────────────────────────────────────────────────────────────────
+handle_open_url() {
+    DATABASE="$KPDB"; PASSWORD=$(read_password_file); KEYFILE="${KPKF:-}"
+    local url; url=$(get_entry_attribute "${1:-}" "URL")
+    if [ -n "$url" ]; then
+        if grep -qi microsoft /proc/version 2>/dev/null; then
+            (explorer.exe "$url" 2>/dev/null || powershell.exe -Command "Start-Process '$url'" &>/dev/null) &
+        else
+            (xdg-open "$url" 2>/dev/null || open "$url" 2>/dev/null) &
+        fi
+        send_notify "kpx" "Opening: $url"
+    fi
+}
+
+# ── Reveal ────────────────────────────────────────────────────────────────────
+handle_reveal() {
+    DATABASE="$KPDB"; PASSWORD=$(read_password_file); KEYFILE="${KPKF:-}"
+    get_entry_show "${1:-}" | less -R
+}
+
+# ── Add new entry ─────────────────────────────────────────────────────────────
+handle_add_entry() {
+    DATABASE="$KPDB"; PASSWORD=$(read_password_file); KEYFILE="${KPKF:-}"
+    load_config
+
+    # Reopen terminal for clean interactive input (fzf closes stdin)
+    exec </dev/tty
+
+    # Restore terminal settings so backspace works correctly
+    stty sane 2>/dev/null || true
+    stty erase "^?" 2>/dev/null || true
+
+    clear
+    echo -e "${CYAN}+------------------------------+${NC}"
+    echo -e "${CYAN}|       Add New Entry          |${NC}"
+    echo -e "${CYAN}+------------------------------+${NC}"
+    echo ""
+
+    local group title username entry_pass url notes gen_pass
+
+    printf "${YELLOW}Group   ${NC}[${DEFAULT_GROUP}]: "; read -r group
+    [ -z "$group" ] && group="$DEFAULT_GROUP"
+
+    printf "${YELLOW}Title   ${NC}: "; read -r title
+    [ -z "$title" ] && { echo -e "${RED}Title is required.${NC}"; return 1; }
+
+    printf "${YELLOW}Username${NC}: "; read -r username
+    printf "${YELLOW}URL     ${NC}: "; read -r url
+    printf "${YELLOW}Notes   ${NC}: "; read -r notes
+
+    echo ""
+    printf "${YELLOW}Generate password? [Y/n]${NC}: "; read -r gen_pass
+    if [[ "${gen_pass:-Y}" =~ ^[Yy]$ ]]; then
+        entry_pass=$(keepassxc-cli generate -L 20 -U -l -n -s 2>/dev/null ||                      cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 20)
+        echo -e "  Generated: ${GREEN}${entry_pass}${NC}"
+    else
+        printf "${YELLOW}Password${NC}: "; read -rs entry_pass; echo ""
+        printf "${YELLOW}Confirm ${NC}: "; read -rs confirm; echo ""
+        if [ "$entry_pass" != "$confirm" ]; then
+            echo -e "${RED}Passwords do not match.${NC}"; return 1
+        fi
+    fi
+
+    echo ""
+    echo -e "${DIM}  Adding entry...${NC}"
+
+    # Check keepassxc-cli supports 'add' (requires >= 2.7.0)
+    local cli_version
+    cli_version=$(keepassxc-cli --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    local cli_major cli_minor
+    cli_major=$(echo "$cli_version" | cut -d. -f1)
+    cli_minor=$(echo "$cli_version" | cut -d. -f2)
+
+    if [ "${cli_major:-0}" -lt 2 ] || { [ "${cli_major:-0}" -eq 2 ] && [ "${cli_minor:-0}" -lt 7 ]; }; then
+        echo -e "${RED}✗  keepassxc-cli ${cli_version} does not support 'add' (requires 2.7.0+)${NC}"
+        echo ""
+        echo -e "${YELLOW}  To add entries, upgrade KeePassXC:${NC}"
+        echo -e "  ${CYAN}https://keepassxc.org/download/${NC}"
+        echo ""
+        echo -e "${YELLOW}  Or install latest via snap:${NC}"
+        echo -e "  ${CYAN}sudo snap install keepassxc${NC}"
+        echo ""
+        echo "Press Enter to continue..."; read -r
+        return 1
+    fi
+
+    local entry_path="${group}/${title}"
+    local add_args=("keepassxc-cli" "add" "-q")
+    [ -n "$KEYFILE" ] && add_args+=("-k" "$KEYFILE")
+    add_args+=("-u" "$username")
+    [ -n "$url" ]   && add_args+=("--url" "$url")
+    [ -n "$notes" ] && add_args+=("--notes" "$notes")
+    add_args+=("-p")
+    add_args+=("$DATABASE" "$entry_path")
+
+    if printf '%s\n%s\n' "$PASSWORD" "$entry_pass" | "${add_args[@]}" &>/dev/null; then
+        echo -e "${GREEN}✔  Entry '${entry_path}' added successfully!${NC}"
+        send_notify "kpx" "Entry '${title}' added"
+    else
+        echo -e "${RED}✗  Failed to add entry. The database may be read-only or the path already exists.${NC}"
+    fi
+    echo ""
+    echo "Press Enter to continue..."; read -r
+}
+
+# ── Database picker ───────────────────────────────────────────────────────────
+pick_database() {
+    local dbs=()
+    local kfs=()
+    local last_db=""
+
+    # Collect from config
+    if [ -f "$CONFIG_FILE" ]; then
+        while IFS='=' read -r key value; do
+            [[ "$key" =~ ^# ]] && continue
+            [[ -z "$key"    ]] && continue
+            key="${key// /}"; value="${value// /}"
+            case "$key" in
+                database) dbs+=("$value"); kfs+=(""); last_db="$value" ;;
+                keyfile)
+                    if [ ${#kfs[@]} -gt 0 ]; then
+                        kfs[${#kfs[@]}-1]="$value"
+                    fi
+                    ;;
+            esac
+        done < "$CONFIG_FILE"
+    fi
+
+    # Also add CLI arg or env var if set
+    if [ -n "${KPDB:-}" ] && [[ ! " ${dbs[*]} " =~ " ${KPDB} " ]]; then
+        dbs+=("$KPDB"); kfs+=("${KPKF:-}")
+    fi
+
+    # If only one database, use it directly
+    if [ ${#dbs[@]} -eq 1 ]; then
+        DATABASE="${dbs[0]}"
+        KEYFILE="${kfs[0]}"
+        return 0
+    fi
+
+    # If multiple, show picker
+    if [ ${#dbs[@]} -gt 1 ]; then
+        echo ""
+        print_info "Multiple databases found. Select one:"
+        echo ""
+
+        local i=0
+        local options=()
+        for db in "${dbs[@]}"; do
+            local kf="${kfs[$i]}"
+            local label="$(basename "$db")"
+            [ -n "$kf" ] && label="${label} [keyfile: $(basename "$kf")]"
+            options+=("$label|$db|$kf")
+            (( i++ )) || true
+        done
+
+        local selected
+        selected=$(printf '%s\n' "${options[@]}" | \
+            fzf --ansi --reverse --border \
+                --prompt="Select database > " \
+                --height=40% \
+                --header="Choose a database to open" \
+                "${FZF_COLORS[@]}" 2>/dev/null) || true
+
+        if [ -z "$selected" ]; then
+            print_error "No database selected"; exit 1
+        fi
+
+        DATABASE=$(echo "$selected" | cut -d'|' -f2)
+        KEYFILE=$(echo "$selected" | cut -d'|' -f3)
+        return 0
+    fi
+
+    # No databases configured anywhere
+    return 1
+}
+
+# ── fzf selector ─────────────────────────────────────────────────────────────
+select_entry() {
+    export KPDB="$DATABASE"
+    export KPPW_FILE="$KPPW_FILE"
+    export KPKF="$KEYFILE"
+
+    local entries
+    entries=$(list_entries)
+
+    if [ -z "$entries" ]; then
+        print_error "No entries found in the database"
+        return
+    fi
+
+    echo "$entries" | fzf \
+        --ansi \
+        --reverse \
+        --border \
+        --prompt="Search > " \
+        --height=95% \
+        --preview="KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --preview {}" \
+        --preview-window=right:46%:wrap \
+        --header="^p:pwd | ^u:user | ^l:url | ^t:totp | ^n:notes | ^o:url | ^a:add | Alt-s:show" \
+        "${FZF_COLORS[@]}" \
+        --bind "ctrl-p:execute-silent(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --copy password {})" \
+        --bind "ctrl-u:execute-silent(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --copy username {})" \
+        --bind "ctrl-l:execute-silent(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --copy url {})" \
+        --bind "ctrl-n:execute-silent(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --copy notes {})" \
+        --bind "ctrl-t:execute-silent(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --copy totp {})" \
+        --bind "ctrl-o:execute-silent(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --open-url {})" \
+        --bind "ctrl-e:execute(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --reveal {})" \
+        --bind "ctrl-a:execute(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --add-entry)+reload(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --list-entries)" \
+        --bind "alt-s:execute(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --show-password {})" \
+        --bind "alt-h:execute(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --show-strength {})" \
+        --bind "enter:execute-silent(KPPW_FILE=\"$KPPW_FILE\" KPDB=\"$DATABASE\" KPKF=\"$KEYFILE\" \"$0\" --copy password {})+abort" \
+    2>/dev/null || true
+}
+
+# ── Arg parsing ───────────────────────────────────────────────────────────────
+parse_args() {
+    local cli_database="" cli_keyfile=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)       show_help; exit 0 ;;
+            -v|--version)    echo "kpx $VERSION"; exit 0 ;;
+            -k|--keyfile)    cli_keyfile="$2"; shift 2 ;;
+            --theme)         THEME="$2"; shift 2 ;;
+            --init)          init_config; exit 0 ;;
+            --list-themes)
+                echo "Available themes: tokyo-night gruvbox catppuccin dracula nord minimal"
+                exit 0 ;;
+            -*)              print_error "Unknown option: $1"; exit 1 ;;
+            *)               cli_database="$1"; shift ;;
+        esac
+    done
+
+    if [ -n "$cli_database" ]; then
+        DATABASE="$cli_database"
+        KEYFILE="${cli_keyfile:-}"
+    else
+        DATABASE="${KPDB:-}"
+        KEYFILE="${cli_keyfile:-${KPKF:-}}"
+    fi
+    PASSWORD=""
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+main() {
+    load_config
+    apply_theme
+    check_dependencies
+    parse_args "$@"
+
+    # If no database from CLI/env, try config databases
+    if [ -z "$DATABASE" ]; then
+        if ! pick_database; then
+            print_error "No database specified."
+            echo "  Run: kpx --init  to create config"
+            echo "  Or:  kpx database.kdbx"
+            exit 1
+        fi
+    fi
+
+    [ ! -f "$DATABASE" ] && { print_error "Database not found: $DATABASE"; exit 1; }
+    [ -n "$KEYFILE" ] && [ ! -f "$KEYFILE" ] && { print_error "Keyfile not found: $KEYFILE"; exit 1; }
+
+    print_banner
+    echo ""
+    print_info "Database : $(basename "$DATABASE")"
+    [ -n "$KEYFILE" ] && print_info "Keyfile  : $(basename "$KEYFILE")"
+    echo ""
+
+    PASSWORD=$(get_password_prompt "Database password")
+    setup_password_file
+    write_password_file
+
+    print_info "Verifying database access..."
+    if ! test_database_access; then
+        print_error "Could not open database. Wrong password or keyfile."
+        exit 1
+    fi
+    print_success "Database opened successfully"
+    sleep 1
+
+    select_entry
+}
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+if [ "${BASH_SOURCE[0]}" -eq "$0" ] 2>/dev/null || [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    case "${1:-}" in
+        --preview)
+            handle_preview "${2:-}" "false" ;;
+        --preview-show)
+            handle_preview "${2:-}" "true" ;;
+        --show-password)
+            handle_show_password "${2:-}"; exit 0 ;;
+        --show-strength)
+            handle_show_strength "${2:-}"; exit 0 ;;
+        --copy)
+            handle_copy "${2:-}" "${3:-}"; exit 0 ;;
+        --open-url)
+            handle_open_url "${2:-}"; exit 0 ;;
+        --reveal)
+            handle_reveal "${2:-}"; exit 0 ;;
+        --add-entry)
+            handle_add_entry; exit 0 ;;
+        --list-entries)
+            DATABASE="$KPDB"; PASSWORD=$(read_password_file); KEYFILE="${KPKF:-}"
+            list_entries; exit 0 ;;
+        *)
+            main "$@" ;;
+    esac
+fi
